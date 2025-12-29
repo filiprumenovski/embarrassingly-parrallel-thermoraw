@@ -1414,35 +1414,6 @@ impl RawFileReader {
         RawFileReaderIter::new(self)
     }
 
-    /// Creates a clone of the reader suitable for parallel access.
-    ///
-    /// This creates a shallow copy sharing the underlying .NET handle and context.
-    /// The .NET runtime handles synchronization internally, making this safe for
-    /// concurrent access across threads.
-    ///
-    /// # Safety
-    ///
-    /// The raw_file_reader pointer and context are already Send + Sync.
-    /// The .NET runtime's internal locking ensures thread-safe FFI calls.
-    pub(crate) fn clone_for_parallel(&self) -> Self {
-        // Re-fetch the managed function pointer from the shared context
-        let vget = self.context
-            .get_function_with_unmanaged_callers_only::<fn(*mut c_void, i32, i32, i32) -> RawVec<u8>>(
-                pdcstr!("librawfilereader.Exports, librawfilereader"),
-                pdcstr!("SpectrumDescriptionForWithOptions"),
-            )
-            .unwrap();
-
-        Self {
-            raw_file_reader: self.raw_file_reader,
-            context: Arc::clone(&self.context),
-            size: self.size,
-            include_signal: self.include_signal,
-            centroid_spectra: self.centroid_spectra,
-            vget,
-        }
-    }
-
     /// Retrieve the status of the .NET `RawFileReader`
     pub fn status(&self) -> RawFileReaderError {
         self.validate_impl();

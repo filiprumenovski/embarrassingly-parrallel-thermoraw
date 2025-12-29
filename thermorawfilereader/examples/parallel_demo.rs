@@ -6,6 +6,7 @@
 
 use std::env;
 use std::io;
+use std::sync::Arc;
 use std::time::Instant;
 
 use thermorawfilereader::RawFileReader;
@@ -15,7 +16,7 @@ fn main() -> io::Result<()> {
     let path = args.get(1).map(|s| s.as_str()).unwrap_or("../tests/data/small.RAW");
 
     println!("Opening RAW file: {}", path);
-    let reader = RawFileReader::open(path)?;
+    let reader = Arc::new(RawFileReader::open(path)?);
     let num_scans = reader.len();
     println!("Found {} scans\n", num_scans);
 
@@ -66,9 +67,10 @@ fn main() -> io::Result<()> {
 
         println!("=== Async Stream Iteration (tokio, batch_size=16) ===");
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let reader_clone = Arc::clone(&reader);
         let start = Instant::now();
-        let async_sum: usize = rt.block_on(async {
-            let mut stream = reader.stream_scans(16);
+        let async_sum: usize = rt.block_on(async move {
+            let mut stream = reader_clone.stream_scans(16);
             let mut sum = 0usize;
             while let Some((_idx, batch)) = stream.next().await {
                 for s in batch {
@@ -102,8 +104,9 @@ fn main() -> io::Result<()> {
     {
         use futures::StreamExt;
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let async_sum: usize = rt.block_on(async {
-            let mut stream = reader.stream_scans(16);
+        let reader_clone = Arc::clone(&reader);
+        let async_sum: usize = rt.block_on(async move {
+            let mut stream = reader_clone.stream_scans(16);
             let mut sum = 0usize;
             while let Some((_idx, batch)) = stream.next().await {
                 for s in batch {

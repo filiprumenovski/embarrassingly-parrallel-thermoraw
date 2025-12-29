@@ -156,7 +156,7 @@ fn bench_async_stream(c: &mut Criterion) {
 
     let path = get_raw_file_path();
     let reader = match RawFileReader::open(&path) {
-        Ok(r) => r,
+        Ok(r) => Arc::new(r),
         Err(e) => {
             eprintln!("Skipping benchmark: could not open {}: {}", path, e);
             return;
@@ -169,13 +169,15 @@ fn bench_async_stream(c: &mut Criterion) {
     group.throughput(Throughput::Elements(num_scans as u64));
 
     for batch_size in [256, 1024, 4096].iter() {
+        let reader_clone = Arc::clone(&reader);
         group.bench_with_input(
             BenchmarkId::new("stream_scans", batch_size),
             batch_size,
             |b, &batch_size| {
                 b.iter(|| {
-                    rt.block_on(async {
-                        let mut stream = reader.stream_scans(batch_size);
+                    let r = Arc::clone(&reader_clone);
+                    rt.block_on(async move {
+                        let mut stream = r.stream_scans(batch_size);
                         let mut sum = 0usize;
                         while let Some((_idx, batch)) = stream.next().await {
                             for s in batch {

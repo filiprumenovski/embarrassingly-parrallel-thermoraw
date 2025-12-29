@@ -153,7 +153,6 @@ impl<'a> ExactSizeIterator for BatchedScansIter<'a> {
 #[cfg(feature = "rayon")]
 mod rayon_impl {
     use super::*;
-    use rayon::iter::plumbing::{bridge, Consumer, Producer, ProducerCallback, UnindexedConsumer};
     use rayon::prelude::*;
 
     /// A parallel iterator over spectra in a RAW file.
@@ -179,146 +178,43 @@ mod rayon_impl {
     ///     .filter(|s| s.ms_level() > 1)
     ///     .count();
     /// ```
-    pub struct ParScansIter {
-        reader: Arc<RawFileReader>,
-        start: usize,
-        end: usize,
+    pub struct ParScansIter<'a> {
+        reader: &'a RawFileReader,
+        len: usize,
     }
 
-    impl ParScansIter {
-        pub(crate) fn new(reader: Arc<RawFileReader>) -> Self {
-            let end = reader.len();
-            Self {
-                reader,
-                start: 0,
-                end,
-            }
-        }
-
-        fn with_bounds(reader: Arc<RawFileReader>, start: usize, end: usize) -> Self {
-            Self { reader, start, end }
+    impl<'a> ParScansIter<'a> {
+        pub(crate) fn new(reader: &'a RawFileReader) -> Self {
+            let len = reader.len();
+            Self { reader, len }
         }
     }
 
-    // Implement Send + Sync for the parallel iterator
-    unsafe impl Send for ParScansIter {}
-    unsafe impl Sync for ParScansIter {}
-
-    impl ParallelIterator for ParScansIter {
+    impl<'a> ParallelIterator for ParScansIter<'a> {
         type Item = RawSpectrum;
 
         fn drive_unindexed<C>(self, consumer: C) -> C::Result
         where
-            C: UnindexedConsumer<Self::Item>,
+            C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
         {
-            bridge(self, consumer)
+            // Delegate to the indexed range parallel iterator
+            (0..self.len)
+                .into_par_iter()
+                .flat_map(|i| self.reader.get(i))
+                .drive_unindexed(consumer)
         }
 
         fn opt_len(&self) -> Option<usize> {
-            Some(self.end - self.start)
-        }
-    }
-
-    impl IndexedParallelIterator for ParScansIter {
-        fn len(&self) -> usize {
-            self.end - self.start
-        }
-
-        fn drive<C>(self, consumer: C) -> C::Result
-        where
-            C: Consumer<Self::Item>,
-        {
-            bridge(self, consumer)
-        }
-
-        fn with_producer<CB>(self, callback: CB) -> CB::Output
-        where
-            CB: ProducerCallback<Self::Item>,
-        {
-            callback.callback(ParScansProducer {
-                reader: self.reader,
-                start: self.start,
-                end: self.end,
-            })
-        }
-    }
-
-    struct ParScansProducer {
-        reader: Arc<RawFileReader>,
-        start: usize,
-        end: usize,
-    }
-
-    impl Producer for ParScansProducer {
-        type Item = RawSpectrum;
-        type IntoIter = ParScansSeqIter;
-
-        fn into_iter(self) -> Self::IntoIter {
-            ParScansSeqIter {
-                reader: self.reader,
-                index: self.start,
-                end: self.end,
-            }
-        }
-
-        fn split_at(self, index: usize) -> (Self, Self) {
-            let mid = self.start + index;
-            (
-                ParScansProducer {
-                    reader: Arc::clone(&self.reader),
-                    start: self.start,
-                    end: mid,
-                },
-                ParScansProducer {
-                    reader: self.reader,
-                    start: mid,
-                    end: self.end,
-                },
-            )
-        }
-    }
-
-    struct ParScansSeqIter {
-        reader: Arc<RawFileReader>,
-        index: usize,
-        end: usize,
-    }
-
-    impl Iterator for ParScansSeqIter {
-        type Item = RawSpectrum;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.index >= self.end {
-                return None;
-            }
-            let spectrum = self.reader.get(self.index);
-            self.index += 1;
-            spectrum
-        }
-
-        fn size_hint(&self) -> (usize, Option<usize>) {
-            let remaining = self.end - self.index;
-            (remaining, Some(remaining))
-        }
-    }
-
-    impl ExactSizeIterator for ParScansSeqIter {}
-    impl DoubleEndedIterator for ParScansSeqIter {
-        fn next_back(&mut self) -> Option<Self::Item> {
-            if self.index >= self.end {
-                return None;
-            }
-            self.end -= 1;
-            self.reader.get(self.end)
+            Some(self.len)
         }
     }
 
     impl RawFileReader {
         /// Returns a parallel iterator over all spectra in the RAW file.
         ///
-        /// This method wraps the reader in an `Arc` internally for thread-safe sharing
-        /// across Rayon's thread pool. The underlying .NET FFI calls are serialized
-        /// internally to ensure thread safety.
+        /// This leverages `RawFileReader`'s `Send + Sync` implementation to safely
+        /// share the reader across Rayon's thread pool. The underlying .NET FFI calls
+        /// are serialized internally to ensure thread safety.
         ///
         /// # Performance
         ///
@@ -347,25 +243,7 @@ mod rayon_impl {
         ///     .collect();
         /// ```
         #[cfg(feature = "rayon")]
-        pub fn par_scans(&self) -> ParScansIter {
-            // SAFETY: We need to create an Arc from a reference. This is safe because:
-            // 1. RawFileReader is Send + Sync
-            // 2. The parallel iterator only borrows during iteration
-            // 3. The caller still owns the RawFileReader
-            //
-            // We use a trick: clone the inner pointer and context to create a new Arc.
-            // Actually, we can't safely do this without an Arc wrapper from the start.
-            //
-            // Instead, we'll use a different approach: create a shared reference wrapper.
-            ParScansIter::new(Arc::new(self.clone_for_parallel()))
-        }
-
-        /// Creates a parallel iterator from an already Arc-wrapped reader.
-        ///
-        /// This is more efficient when you already have the reader in an Arc,
-        /// as it avoids an additional clone.
-        #[cfg(feature = "rayon")]
-        pub fn par_scans_arc(self: Arc<Self>) -> ParScansIter {
+        pub fn par_scans(&self) -> ParScansIter<'_> {
             ParScansIter::new(self)
         }
     }
@@ -384,21 +262,19 @@ mod tokio_impl {
     use crossbeam_channel::{bounded, Receiver, Sender};
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use tokio::sync::oneshot;
 
     /// An async stream that yields batches of spectra with prefetching.
     ///
-    /// This stream uses a background thread to prefetch spectrum batches while
-    /// the async task processes the current batch. This hides .NET FFI latency
-    /// and provides smooth async/await integration.
+    /// This stream uses `spawn_blocking` to read spectrum batches without blocking
+    /// the async runtime. Batches are delivered through a bounded channel with
+    /// backpressure.
     ///
     /// # Architecture
     ///
     /// ```text
     /// ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-    /// │  Background     │     │   Crossbeam      │     │  Async Task     │
-    /// │  Thread         │────▶│   Channel        │────▶│  (Consumer)     │
-    /// │  (FFI calls)    │     │   (bounded)      │     │                 │
+    /// │  spawn_blocking │     │   Crossbeam      │     │  Async Task     │
+    /// │  (FFI calls)    │────▶│   Channel        │────▶│  (Consumer)     │
     /// └─────────────────┘     └──────────────────┘     └─────────────────┘
     /// ```
     ///
@@ -407,9 +283,10 @@ mod tokio_impl {
     /// ```no_run
     /// use thermorawfilereader::RawFileReader;
     /// use futures::StreamExt;
+    /// use std::sync::Arc;
     ///
     /// async fn process_scans() -> std::io::Result<()> {
-    ///     let reader = RawFileReader::open("sample.RAW")?;
+    ///     let reader = Arc::new(RawFileReader::open("sample.RAW")?);
     ///     let mut stream = reader.stream_scans(1024);
     ///
     ///     while let Some((batch_idx, spectra)) = stream.next().await {
@@ -420,7 +297,6 @@ mod tokio_impl {
     /// ```
     pub struct AsyncScanStream {
         receiver: Receiver<(usize, Vec<RawSpectrum>)>,
-        _shutdown: Option<oneshot::Sender<()>>,
     }
 
     impl AsyncScanStream {
@@ -430,21 +306,17 @@ mod tokio_impl {
                 Sender<(usize, Vec<RawSpectrum>)>,
                 Receiver<(usize, Vec<RawSpectrum>)>,
             ) = bounded(prefetch_batches);
-            let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
             let size = reader.len();
 
             // Spawn blocking background thread for FFI calls
+            // The reader is moved into the thread, which is safe because Arc<RawFileReader>
+            // properly manages the lifetime
             std::thread::spawn(move || {
                 let mut index = 0usize;
                 let mut batch_idx = 0usize;
 
                 while index < size {
-                    // Check for shutdown
-                    if shutdown_rx.try_recv().is_ok() {
-                        break;
-                    }
-
                     let end = (index + batch_size).min(size);
                     let mut batch = Vec::with_capacity(end - index);
 
@@ -465,10 +337,7 @@ mod tokio_impl {
                 }
             });
 
-            Self {
-                receiver: rx,
-                _shutdown: Some(shutdown_tx),
-            }
+            Self { receiver: rx }
         }
     }
 
@@ -506,9 +375,8 @@ mod tokio_impl {
     impl RawFileReader {
         /// Returns an async stream that yields batches of spectra with prefetching.
         ///
-        /// This method spawns a background thread that reads spectra ahead of time,
-        /// hiding the .NET FFI latency from the async task. Batches are delivered
-        /// through a bounded channel with backpressure.
+        /// **Note**: This method requires the reader to be wrapped in an `Arc` for
+        /// thread-safe sharing with the background prefetch thread.
         ///
         /// # Arguments
         ///
@@ -524,10 +392,11 @@ mod tokio_impl {
         /// ```no_run
         /// use thermorawfilereader::RawFileReader;
         /// use futures::StreamExt;
+        /// use std::sync::Arc;
         ///
         /// #[tokio::main]
         /// async fn main() -> std::io::Result<()> {
-        ///     let reader = RawFileReader::open("sample.RAW")?;
+        ///     let reader = Arc::new(RawFileReader::open("sample.RAW")?);
         ///     let mut stream = reader.stream_scans(1024);
         ///
         ///     let mut total_points = 0usize;
@@ -543,13 +412,7 @@ mod tokio_impl {
         /// }
         /// ```
         #[cfg(feature = "tokio")]
-        pub fn stream_scans(&self, batch_size: usize) -> AsyncScanStream {
-            AsyncScanStream::new(Arc::new(self.clone_for_parallel()), batch_size)
-        }
-
-        /// Creates an async stream from an already Arc-wrapped reader.
-        #[cfg(feature = "tokio")]
-        pub fn stream_scans_arc(self: Arc<Self>, batch_size: usize) -> AsyncScanStream {
+        pub fn stream_scans(self: Arc<Self>, batch_size: usize) -> AsyncScanStream {
             AsyncScanStream::new(self, batch_size)
         }
     }
