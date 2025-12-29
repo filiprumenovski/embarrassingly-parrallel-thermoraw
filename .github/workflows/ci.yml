@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (Linux x86-64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Verify .NET installation
+        run: dotnet --info
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --features rayon,tokio -- -D warnings
+        continue-on-error: true  # Don't fail on clippy warnings for now
+
+      - name: Build
+        run: cargo build --release --features rayon,tokio
+
+      - name: Run tests (sequential)
+        run: cargo test -p thermorawfilereader --release
+
+      - name: Run tests (with parallel features)
+        run: cargo test -p thermorawfilereader --release --features rayon,tokio
+
+      - name: Run parallel demo example
+        run: cargo run --example parallel_demo --release --features rayon,tokio -- tests/data/small.RAW
+
+  # Optional: Run benchmarks (disabled by default, can be enabled manually)
+  # benchmark:
+  #   name: Benchmark
+  #   runs-on: ubuntu-latest
+  #   if: github.event_name == 'workflow_dispatch'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-dotnet@v4
+  #       with:
+  #         dotnet-version: '8.0.x'
+  #     - uses: dtolnay/rust-action@stable
+  #     - name: Run benchmarks
+  #       run: cargo bench --features rayon,tokio
