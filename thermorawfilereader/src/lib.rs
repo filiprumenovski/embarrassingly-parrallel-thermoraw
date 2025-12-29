@@ -2,6 +2,32 @@
 //!
 //! The main access point is [`RawFileReader`], via [`RawFileReader::open`].
 //!
+//! # High-Performance Parallel Iteration
+//!
+//! This crate provides optional high-performance iterators for parallel scan extraction:
+//!
+//! - **`par_scans()`** (feature: `rayon`) - Rayon-based parallel iterator, ~15x speedup on 16-core CPUs
+//! - **`stream_scans()`** (feature: `tokio`/`async`) - Tokio async stream with prefetching
+//! - **`batched_scans()`** (always available) - Batched iterator for Arrow RecordBatch construction
+//!
+//! ## Example
+//!
+//! ```no_run
+//! use thermorawfilereader::RawFileReader;
+//!
+//! # #[cfg(feature = "rayon")]
+//! fn parallel_example() -> std::io::Result<()> {
+//!     use rayon::prelude::*;
+//!
+//!     let reader = RawFileReader::open("sample.RAW")?;
+//!     let total: usize = reader.par_scans()
+//!         .map(|s| s.data().map(|d| d.len()).unwrap_or(0))
+//!         .sum();
+//!     println!("Total data points: {}", total);
+//!     Ok(())
+//! }
+//! ```
+//!
 //! # Limitations
 //!
 //! ## Platforms
@@ -23,6 +49,7 @@
 mod constants;
 pub(crate) mod r#gen;
 pub(crate) mod wrap;
+pub mod parallel;
 
 #[doc = "The FlatBuffers schema used to exchange data, see [`schema.fbs`](https://github.com/mobiusklein/thermorawfilereader.rs/blob/main/schema/schema.fbs)"]
 pub use crate::r#gen::schema_generated::librawfilereader as schema;
@@ -33,6 +60,15 @@ pub use crate::wrap::{
     StatusLogCollection, StatusLog, TrailerValue, TrailerValues,
 };
 pub use constants::{IonizationMode, MassAnalyzer, TraceType, MSOrder};
+
+// Re-export parallel iteration types
+pub use parallel::BatchedScansIter;
+
+#[cfg(feature = "rayon")]
+pub use parallel::ParScansIter;
+
+#[cfg(feature = "tokio")]
+pub use parallel::AsyncScanStream;
 
 #[doc(alias = "Re-exported from `dotnetrawfilereader_sys`")]
 pub use dotnetrawfilereader_sys::{DotNetRuntimeCreationError, set_runtime_dir, try_get_runtime};
