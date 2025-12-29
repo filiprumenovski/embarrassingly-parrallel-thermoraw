@@ -27,7 +27,7 @@ jobs:
         run: dotnet --info
 
       - name: Setup Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
@@ -71,6 +71,6 @@ jobs:
   #     - uses: actions/setup-dotnet@v4
   #       with:
   #         dotnet-version: '8.0.x'
-  #     - uses: dtolnay/rust-action@stable
+  #     - uses: dtolnay/rust-toolchain@stable
   #     - name: Run benchmarks
   #       run: cargo bench --features rayon,tokio
