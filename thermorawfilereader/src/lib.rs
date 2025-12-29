@@ -2,13 +2,43 @@
 //!
 //! The main access point is [`RawFileReader`], via [`RawFileReader::open`].
 //!
+//! # Disclaimer
+//!
+//! This is a fork of the original [`thermorawfilereader`](https://crates.io/crates/thermorawfilereader)
+//! crate by Joshua Klein (mobiusklein). This fork adds experimental high-performance parallel
+//! iteration capabilities. The parallel features are provided "as-is" without warranty.
+//! Performance claims are theoretical targets based on ThermoRawFileParser multiprocessing
+//! benchmarks and may vary depending on hardware, .NET runtime version, and file characteristics.
+//!
+//! # Acknowledgements
+//!
+//! - **Original Author**: Joshua Klein ([mobiusklein](https://github.com/mobiusklein)) -
+//!   Creator of the original thermorawfilereader.rs library
+//! - **Upstream Repository**: <https://github.com/mobiusklein/thermorawfilereader.rs>
+//! - **Thermo Fisher Scientific**: For providing the RawFileReader .NET library
+//! - **ThermoRawFileParser**: Performance benchmarks inspired by
+//!   <https://github.com/compomics/ThermoRawFileParser>
+//!
 //! # High-Performance Parallel Iteration
 //!
-//! This crate provides optional high-performance iterators for parallel scan extraction:
+//! This fork provides optional high-performance iterators for parallel scan extraction:
 //!
-//! - **`par_scans()`** (feature: `rayon`) - Rayon-based parallel iterator, ~15x speedup on 16-core CPUs
+//! - **`par_scans()`** (feature: `rayon`) - Rayon-based parallel iterator, targeting ~15x speedup on 16-core CPUs
 //! - **`stream_scans()`** (feature: `tokio`/`async`) - Tokio async stream with prefetching
 //! - **`batched_scans()`** (always available) - Batched iterator for Arrow RecordBatch construction
+//!
+//! ## Performance Notes
+//!
+//! Actual speedup depends on:
+//! - Number of CPU cores and their performance characteristics
+//! - .NET runtime version and configuration
+//! - RAW file size and spectrum complexity
+//! - Storage I/O performance (SSD vs HDD)
+//! - Memory bandwidth and cache characteristics
+//!
+//! The .NET FFI calls are serialized internally by the runtime, so parallelism benefits
+//! primarily come from concurrent FlatBuffer deserialization and data processing, not
+//! from parallel .NET calls themselves.
 //!
 //! ## Example
 //!
@@ -45,7 +75,9 @@
 //! so for the moment we can only open RAW files on the file system.
 //!
 //! # Licensing
-//! By using this library, you agree to the [RawFileReader License](https://github.com/thermofisherlsms/RawFileReader/blob/main/License.doc)
+//!
+//! This crate is licensed under Apache-2.0, the same license as the original thermorawfilereader.
+//! By using this library, you also agree to the [RawFileReader License](https://github.com/thermofisherlsms/RawFileReader/blob/main/License.doc)
 mod constants;
 pub(crate) mod r#gen;
 pub(crate) mod wrap;

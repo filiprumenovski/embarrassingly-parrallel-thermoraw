@@ -6,11 +6,24 @@
 //! 2. **`stream_scans()`** - Tokio async stream with prefetching for async/await workflows
 //! 3. **`batched_scans()`** - Batched iterator for Arrow RecordBatch construction amortization
 //!
-//! # Performance
+//! # Disclaimer
 //!
-//! On a 16-core M4 Max with a 1GB RAW file (~100k MS2 scans):
+//! These parallel iteration features are experimental and provided "as-is". Performance
+//! characteristics may vary significantly based on hardware, .NET runtime configuration,
+//! and workload characteristics. The claimed speedups are theoretical targets and should
+//! be validated with benchmarks on your specific use case.
+//!
+//! # Performance Targets
+//!
+//! Theoretical targets on a 16-core M4 Max with a 1GB RAW file (~100k MS2 scans):
 //! - Sequential: ~3-5 seconds
-//! - Parallel (rayon): ~200ms (15x speedup)
+//! - Parallel (rayon): ~200ms (up to 15x speedup)
+//!
+//! **Note**: Actual performance depends on many factors including:
+//! - .NET runtime overhead and internal locking
+//! - Memory bandwidth and cache effects
+//! - Storage I/O characteristics
+//! - Spectrum complexity and data sizes
 //!
 //! # Feature Flags
 //!
@@ -25,6 +38,12 @@
 //! The `RawFileReader` is `Send + Sync`, and all FFI calls to the .NET runtime are
 //! serialized internally. The parallel iterators use `Arc<RawFileReader>` for shared
 //! access across threads.
+//!
+//! # Acknowledgements
+//!
+//! This parallel iteration implementation builds upon the excellent foundation of
+//! thermorawfilereader by Joshua Klein (mobiusklein). Performance targets were
+//! inspired by ThermoRawFileParser multiprocessing benchmarks.
 //!
 //! # Example
 //!
