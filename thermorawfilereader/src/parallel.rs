@@ -259,21 +259,21 @@ pub use rayon_impl::ParScansIter;
 #[cfg(feature = "tokio")]
 mod tokio_impl {
     use super::*;
-    use crossbeam_channel::{bounded, Receiver, Sender};
     use std::pin::Pin;
     use std::task::{Context, Poll};
+    use tokio::sync::mpsc;
 
     /// An async stream that yields batches of spectra with prefetching.
     ///
-    /// This stream uses `spawn_blocking` to read spectrum batches without blocking
-    /// the async runtime. Batches are delivered through a bounded channel with
-    /// backpressure.
+    /// This stream uses `tokio::task::spawn_blocking` to read spectrum batches
+    /// without blocking the async runtime. Batches are delivered through a
+    /// tokio mpsc channel with proper async waking semantics.
     ///
     /// # Architecture
     ///
     /// ```text
     /// ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-    /// │  spawn_blocking │     │   Crossbeam      │     │  Async Task     │
+    /// │ spawn_blocking  │     │   Tokio MPSC     │     │  Async Task     │
     /// │  (FFI calls)    │────▶│   Channel        │────▶│  (Consumer)     │
     /// └─────────────────┘     └──────────────────┘     └─────────────────┘
     /// ```
@@ -296,23 +296,19 @@ mod tokio_impl {
     /// }
     /// ```
     pub struct AsyncScanStream {
-        receiver: Receiver<(usize, Vec<RawSpectrum>)>,
+        receiver: mpsc::Receiver<(usize, Vec<RawSpectrum>)>,
     }
 
     impl AsyncScanStream {
         pub(crate) fn new(reader: Arc<RawFileReader>, batch_size: usize) -> Self {
-            let prefetch_batches = 2; // Number of batches to prefetch
-            let (tx, rx): (
-                Sender<(usize, Vec<RawSpectrum>)>,
-                Receiver<(usize, Vec<RawSpectrum>)>,
-            ) = bounded(prefetch_batches);
+            let prefetch_batches = 4; // Number of batches to prefetch
+            let (tx, rx) = mpsc::channel::<(usize, Vec<RawSpectrum>)>(prefetch_batches);
 
             let size = reader.len();
 
-            // Spawn blocking background thread for FFI calls
-            // The reader is moved into the thread, which is safe because Arc<RawFileReader>
-            // properly manages the lifetime
-            std::thread::spawn(move || {
+            // Spawn a blocking task for FFI calls
+            // Using tokio::task::spawn_blocking ensures proper integration with the runtime
+            tokio::task::spawn_blocking(move || {
                 let mut index = 0usize;
                 let mut batch_idx = 0usize;
 
@@ -326,8 +322,8 @@ mod tokio_impl {
                         }
                     }
 
-                    // Send batch (blocks if channel is full - backpressure)
-                    if tx.send((batch_idx, batch)).is_err() {
+                    // Send batch - use blocking_send since we're in a blocking context
+                    if tx.blocking_send((batch_idx, batch)).is_err() {
                         // Receiver dropped, exit
                         break;
                     }
@@ -335,6 +331,7 @@ mod tokio_impl {
                     index = end;
                     batch_idx += 1;
                 }
+                // tx is dropped here, closing the channel
             });
 
             Self { receiver: rx }
@@ -344,31 +341,9 @@ mod tokio_impl {
     impl futures_core::Stream for AsyncScanStream {
         type Item = (usize, Vec<RawSpectrum>);
 
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            // Try to receive without blocking first
-            match self.receiver.try_recv() {
-                Ok(batch) => Poll::Ready(Some(batch)),
-                Err(crossbeam_channel::TryRecvError::Empty) => {
-                    // Channel empty, need to wait
-                    // We use a simple polling approach - register waker and return Pending
-                    let waker = cx.waker().clone();
-                    let receiver = self.receiver.clone();
-
-                    // Spawn a task to wake us when data is available
-                    tokio::spawn(async move {
-                        // Use spawn_blocking to wait on the channel
-                        let _ = tokio::task::spawn_blocking(move || {
-                            // Block briefly waiting for data
-                            let _ = receiver.recv_timeout(std::time::Duration::from_millis(1));
-                        })
-                        .await;
-                        waker.wake();
-                    });
-
-                    Poll::Pending
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => Poll::Ready(None),
-            }
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            // Tokio's mpsc::Receiver has poll_recv which handles waking correctly
+            self.receiver.poll_recv(cx)
         }
     }
 
@@ -384,8 +359,8 @@ mod tokio_impl {
         ///
         /// # Prefetching
         ///
-        /// The stream maintains 2 batches of prefetch buffer. While your async task
-        /// processes batch N, batches N+1 and N+2 are being loaded in the background.
+        /// The stream maintains 4 batches of prefetch buffer. While your async task
+        /// processes batch N, batches N+1 through N+4 are being loaded in the background.
         ///
         /// # Example
         ///
@@ -495,6 +470,95 @@ mod tests {
                 .sum();
 
             assert_eq!(par_sum, seq_sum);
+        }
+    }
+
+    #[cfg(feature = "tokio")]
+    mod async_tests {
+        use super::*;
+        use futures::StreamExt;
+
+        #[tokio::test]
+        async fn test_stream_scans_complete() {
+            // Test that stream_scans yields all spectra
+            if let Ok(reader) = RawFileReader::open("../tests/data/small.RAW") {
+                let expected = reader.len();
+                let reader = Arc::new(reader);
+
+                let mut stream = reader.stream_scans(16);
+                let mut count = 0usize;
+
+                while let Some((_batch_idx, batch)) = stream.next().await {
+                    count += batch.len();
+                }
+
+                assert_eq!(count, expected, "Must receive all {} spectra", expected);
+            }
+        }
+
+        #[tokio::test]
+        async fn test_stream_scans_data_integrity() {
+            // Test that stream_scans produces the same data as sequential iteration
+            if let Ok(reader) = RawFileReader::open("../tests/data/small.RAW") {
+                let seq_sum: usize = reader
+                    .iter()
+                    .map(|s| s.data().map(|d| d.len()).unwrap_or(0))
+                    .sum();
+
+                let reader = Arc::new(reader);
+                let mut stream = reader.stream_scans(16);
+                let mut async_sum = 0usize;
+
+                while let Some((_batch_idx, batch)) = stream.next().await {
+                    for spectrum in batch {
+                        async_sum += spectrum.data().map(|d| d.len()).unwrap_or(0);
+                    }
+                }
+
+                assert_eq!(async_sum, seq_sum, "Async sum must match sequential sum");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_stream_scans_batch_ordering() {
+            // Test that batches are delivered in order
+            if let Ok(reader) = RawFileReader::open("../tests/data/small.RAW") {
+                let reader = Arc::new(reader);
+                let mut stream = reader.stream_scans(10);
+                let mut last_batch_idx: Option<usize> = None;
+
+                while let Some((batch_idx, _batch)) = stream.next().await {
+                    if let Some(last) = last_batch_idx {
+                        assert_eq!(
+                            batch_idx,
+                            last + 1,
+                            "Batches must be delivered in order"
+                        );
+                    }
+                    last_batch_idx = Some(batch_idx);
+                }
+
+                assert!(last_batch_idx.is_some(), "Should have received at least one batch");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_stream_scans_early_drop() {
+            // Test that dropping the stream early doesn't cause issues
+            if let Ok(reader) = RawFileReader::open("../tests/data/small.RAW") {
+                let reader = Arc::new(reader);
+                let mut stream = reader.stream_scans(10);
+
+                // Only consume first batch
+                let first = stream.next().await;
+                assert!(first.is_some(), "Should receive at least one batch");
+
+                // Drop the stream - should not panic or hang
+                drop(stream);
+
+                // Small delay to let background task notice the drop
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
         }
     }
 }

@@ -35,7 +35,7 @@ netcorehost-latest = ["netcorehost/latest", "dotnetrawfilereader-sys/netcorehost
 
 # High-performance parallel iteration features
 rayon = ["dep:rayon"]
-tokio = ["dep:tokio", "dep:crossbeam-channel", "dep:futures-core"]
+tokio = ["dep:tokio", "dep:futures-core"]
 async = ["tokio"]
 
 
@@ -50,15 +50,13 @@ bytemuck = "1.18.0"
 
 # Optional dependencies for parallel iteration
 rayon = { version = "1.10", optional = true }
-tokio = { version = "1", features = ["rt", "sync"], optional = true }
-crossbeam-channel = { version = "0.5", optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"], optional = true }
 futures-core = { version = "0.3", optional = true }
 
 [dev-dependencies]
 rayon = { version = "1.10" }
 criterion = { version = "0.5", features = ["html_reports"] }
-tokio = { version = "1", features = ["full"] }
-crossbeam-channel = "0.5"
+tokio = { version = "1", features = ["full", "test-util"] }
 futures = "0.3"
 
 [package.metadata.docs.rs]
